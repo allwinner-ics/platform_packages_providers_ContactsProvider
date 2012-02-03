@@ -32,7 +32,6 @@ import android.content.Entity;
 import android.content.EntityIterator;
 import android.content.res.AssetFileDescriptor;
 import android.database.Cursor;
-import android.database.sqlite.SQLiteConstraintException;
 import android.net.Uri;
 import android.os.AsyncTask;
 import android.provider.ContactsContract;
@@ -65,7 +64,6 @@ import android.provider.ContactsContract.Settings;
 import android.provider.ContactsContract.StatusUpdates;
 import android.provider.ContactsContract.StreamItemPhotos;
 import android.provider.ContactsContract.StreamItems;
-import android.provider.LiveFolders;
 import android.provider.OpenableColumns;
 import android.test.MoreAsserts;
 import android.test.suitebuilder.annotation.LargeTest;
@@ -86,8 +84,8 @@ import java.util.Locale;
  *
  * Run the test like this:
  * <code>
- * adb shell am instrument -e class com.android.providers.contacts.ContactsProvider2Test -w \
- *         com.android.providers.contacts.tests/android.test.InstrumentationTestRunner
+   adb shell am instrument -e class com.android.providers.contacts.ContactsProvider2Test -w \
+           com.android.providers.contacts.tests/android.test.InstrumentationTestRunner
  * </code>
  */
 @LargeTest
@@ -601,15 +599,6 @@ public class ContactsProvider2Test extends BaseContactsProvider2Test {
         });
     }
 
-    public void testLiveFoldersProjection() {
-        assertProjection(
-            Uri.withAppendedPath(ContactsContract.AUTHORITY_URI, "live_folders/contacts"),
-            new String[]{
-                LiveFolders._ID,
-                LiveFolders.NAME,
-        });
-    }
-
     public void testDirectoryProjection() {
         assertProjection(Directory.CONTENT_URI, new String[]{
                 Directory._ID,
@@ -908,15 +897,23 @@ public class ContactsProvider2Test extends BaseContactsProvider2Test {
         // Two results should come, since they are separate entries anyway.
         assertStoredValues(Phone.CONTENT_URI, new ContentValues[] {values1, values1});
 
+        // Even with remove_duplicate_entries flag, we should return two results here, because
+        // they have different raw_contact_id-s.
+        final Uri dedupeUri = Phone.CONTENT_URI.buildUpon()
+                .appendQueryParameter(ContactsContract.REMOVE_DUPLICATE_ENTRIES, "true")
+                .build();
+        assertStoredValues(dedupeUri, new ContentValues[] {values1, values1});
+
         setAggregationException(AggregationExceptions.TYPE_KEEP_TOGETHER,
                 rawContactId1, rawContactId2);
 
         assertAggregated(rawContactId1, rawContactId2, "123456789");
 
-        // Just one result should come, since
-        // - those two numbers have the same phone number
-        // - those two contacts are aggregated
-        assertStoredValues(Phone.CONTENT_URI, values1);
+        // Contact merge won't affect the default result of Phone Uri.
+        assertStoredValues(Phone.CONTENT_URI, new ContentValues[] {values1, values1});
+
+        // We should detect duplicates when requested.
+        assertStoredValues(dedupeUri, values1);
     }
 
     public void testPhonesFilterQuery() {
@@ -1112,13 +1109,13 @@ public class ContactsProvider2Test extends BaseContactsProvider2Test {
         values.put(RawContacts.STARRED, 1);
 
         Uri rawContactUri = mResolver.insert(RawContacts.CONTENT_URI, values);
-        long rawContactId = ContentUris.parseId(rawContactUri);
+        final long rawContactId = ContentUris.parseId(rawContactUri);
 
         insertStructuredName(rawContactId, "Meghan", "Knox");
-        Uri uri = insertEmail(rawContactId, "meghan@acme.com");
-        long emailId = ContentUris.parseId(uri);
+        final Uri emailUri = insertEmail(rawContactId, "meghan@acme.com");
+        final long emailId = ContentUris.parseId(emailUri);
 
-        long contactId = queryContactId(rawContactId);
+        final long contactId = queryContactId(rawContactId);
         values.clear();
         values.put(Data._ID, emailId);
         values.put(Data.RAW_CONTACT_ID, rawContactId);
@@ -1134,8 +1131,32 @@ public class ContactsProvider2Test extends BaseContactsProvider2Test {
         values.put(Contacts.TIMES_CONTACTED, 54321);
         values.put(Contacts.STARRED, 1);
 
+        assertStoredValues(Email.CONTENT_URI, values);
         assertStoredValues(ContentUris.withAppendedId(Email.CONTENT_URI, emailId), values);
         assertSelection(Email.CONTENT_URI, values, Data._ID, emailId);
+
+        // Check if the provider detects duplicated email addresses.
+        final Uri emailUri2 = insertEmail(rawContactId, "meghan@acme.com");
+        final long emailId2 = ContentUris.parseId(emailUri2);
+        final ContentValues values2 = new ContentValues(values);
+        values2.put(Data._ID, emailId2);
+
+        final Uri dedupeUri = Email.CONTENT_URI.buildUpon()
+                .appendQueryParameter(ContactsContract.REMOVE_DUPLICATE_ENTRIES, "true")
+                .build();
+
+        // URI with ID should return a correct result.
+        assertStoredValues(ContentUris.withAppendedId(Email.CONTENT_URI, emailId), values);
+        assertStoredValues(ContentUris.withAppendedId(dedupeUri, emailId), values);
+        assertStoredValues(ContentUris.withAppendedId(Email.CONTENT_URI, emailId2), values2);
+        assertStoredValues(ContentUris.withAppendedId(dedupeUri, emailId2), values2);
+
+        assertStoredValues(Email.CONTENT_URI, new ContentValues[] {values, values2});
+
+        // If requested to remove duplicates, the query should return just one result,
+        // whose _ID won't be deterministic.
+        values.remove(Data._ID);
+        assertStoredValues(dedupeUri, values);
     }
 
     public void testEmailsLookupQuery() {
@@ -1373,9 +1394,9 @@ public class ContactsProvider2Test extends BaseContactsProvider2Test {
     public void testPostalsQuery() {
         long rawContactId = createRawContactWithName("Alice", "Nextore");
         Uri dataUri = insertPostalAddress(rawContactId, "1600 Amphiteatre Ave, Mountain View");
-        long dataId = ContentUris.parseId(dataUri);
+        final long dataId = ContentUris.parseId(dataUri);
 
-        long contactId = queryContactId(rawContactId);
+        final long contactId = queryContactId(rawContactId);
         ContentValues values = new ContentValues();
         values.put(Data._ID, dataId);
         values.put(Data.RAW_CONTACT_ID, rawContactId);
@@ -1384,9 +1405,35 @@ public class ContactsProvider2Test extends BaseContactsProvider2Test {
         values.put(StructuredPostal.FORMATTED_ADDRESS, "1600 Amphiteatre Ave, Mountain View");
         values.put(Contacts.DISPLAY_NAME, "Alice Nextore");
 
+        assertStoredValues(StructuredPostal.CONTENT_URI, values);
         assertStoredValues(ContentUris.withAppendedId(StructuredPostal.CONTENT_URI, dataId),
                 values);
         assertSelection(StructuredPostal.CONTENT_URI, values, Data._ID, dataId);
+
+        // Check if the provider detects duplicated addresses.
+        Uri dataUri2 = insertPostalAddress(rawContactId, "1600 Amphiteatre Ave, Mountain View");
+        final long dataId2 = ContentUris.parseId(dataUri2);
+        final ContentValues values2 = new ContentValues(values);
+        values2.put(Data._ID, dataId2);
+
+        final Uri dedupeUri = StructuredPostal.CONTENT_URI.buildUpon()
+                .appendQueryParameter(ContactsContract.REMOVE_DUPLICATE_ENTRIES, "true")
+                .build();
+
+        // URI with ID should return a correct result.
+        assertStoredValues(ContentUris.withAppendedId(StructuredPostal.CONTENT_URI, dataId),
+                values);
+        assertStoredValues(ContentUris.withAppendedId(dedupeUri, dataId), values);
+        assertStoredValues(ContentUris.withAppendedId(StructuredPostal.CONTENT_URI, dataId2),
+                values2);
+        assertStoredValues(ContentUris.withAppendedId(dedupeUri, dataId2), values2);
+
+        assertStoredValues(StructuredPostal.CONTENT_URI, new ContentValues[] {values, values2});
+
+        // If requested to remove duplicates, the query should return just one result,
+        // whose _ID won't be deterministic.
+        values.remove(Data._ID);
+        assertStoredValues(dedupeUri, values);
     }
 
     public void testQueryContactData() {
@@ -2201,6 +2248,18 @@ public class ContactsProvider2Test extends BaseContactsProvider2Test {
         v4.put(Groups.SUMMARY_GROUP_COUNT_PER_ACCOUNT,
                 v1.getAsInteger(Groups.SUMMARY_GROUP_COUNT_PER_ACCOUNT));
         assertStoredValues(uri, new ContentValues[] { v1, v2, v3, v4 });
+
+        // We change the tables dynamically according to the requested projection.
+        // Make sure the SUMMARY_COUNT column exists
+        v1.clear();
+        v1.put(Groups.SUMMARY_COUNT, 2);
+        v2.clear();
+        v2.put(Groups.SUMMARY_COUNT, 1);
+        v3.clear();
+        v3.put(Groups.SUMMARY_COUNT, 0);
+        v4.clear();
+        v4.put(Groups.SUMMARY_COUNT, 0);
+        assertStoredValuesWithProjection(uri, new ContentValues[] { v1, v2, v3, v4 });
     }
 
     public void testSettingsQuery() {
@@ -5378,55 +5437,6 @@ public class ContactsProvider2Test extends BaseContactsProvider2Test {
 
     public void testNewPrimaryInUpdateWithSuperPrimary() {
         testChangingPrimary(true, true);
-    }
-
-    public void testLiveFolders() {
-        long rawContactId1 = createRawContactWithName("James", "Sullivan");
-        insertPhoneNumber(rawContactId1, "5234567890");
-        long contactId1 = queryContactId(rawContactId1);
-
-        long rawContactId2 = createRawContactWithName("Mike", "Wazowski");
-        long contactId2 = queryContactId(rawContactId2);
-        storeValue(Contacts.CONTENT_URI, contactId2, Contacts.STARRED, "1");
-
-        long rawContactId3 = createRawContactWithName("Randall", "Boggs");
-        long contactId3 = queryContactId(rawContactId3);
-        long groupId = createGroup(NO_ACCOUNT, "src1", "VIP");
-        insertGroupMembership(rawContactId3, groupId);
-
-        assertLiveFolderContents(
-                Uri.withAppendedPath(ContactsContract.AUTHORITY_URI,
-                        "live_folders/contacts"),
-                contactId1, "James Sullivan",
-                contactId2, "Mike Wazowski",
-                contactId3, "Randall Boggs");
-
-        assertLiveFolderContents(
-                Uri.withAppendedPath(ContactsContract.AUTHORITY_URI,
-                        "live_folders/contacts_with_phones"),
-                contactId1, "James Sullivan");
-
-        assertLiveFolderContents(
-                Uri.withAppendedPath(ContactsContract.AUTHORITY_URI,
-                        "live_folders/favorites"),
-                contactId2, "Mike Wazowski");
-
-        assertLiveFolderContents(
-                Uri.withAppendedPath(Uri.withAppendedPath(ContactsContract.AUTHORITY_URI,
-                        "live_folders/contacts"), Uri.encode("VIP")),
-                contactId3, "Randall Boggs");
-    }
-
-    private void assertLiveFolderContents(Uri uri, Object... expected) {
-        Cursor c = mResolver.query(uri, new String[]{LiveFolders._ID, LiveFolders.NAME},
-                null, null, LiveFolders._ID);
-        assertEquals(expected.length/2, c.getCount());
-        for (int i = 0; i < expected.length/2; i++) {
-            assertTrue(c.moveToNext());
-            assertEquals(((Long)expected[i * 2]).longValue(), c.getLong(0));
-            assertEquals(expected[i * 2 + 1], c.getString(1));
-        }
-        c.close();
     }
 
     public void testContactCounts() {

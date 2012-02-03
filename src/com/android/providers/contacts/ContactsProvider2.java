@@ -27,7 +27,7 @@ import com.android.providers.contacts.ContactsDatabaseHelper.ContactsStatusUpdat
 import com.android.providers.contacts.ContactsDatabaseHelper.DataColumns;
 import com.android.providers.contacts.ContactsDatabaseHelper.DataUsageStatColumns;
 import com.android.providers.contacts.ContactsDatabaseHelper.GroupsColumns;
-import com.android.providers.contacts.ContactsDatabaseHelper.MimetypesColumns;
+import com.android.providers.contacts.ContactsDatabaseHelper.Joins;
 import com.android.providers.contacts.ContactsDatabaseHelper.NameLookupColumns;
 import com.android.providers.contacts.ContactsDatabaseHelper.NameLookupType;
 import com.android.providers.contacts.ContactsDatabaseHelper.PhoneColumns;
@@ -140,7 +140,6 @@ import android.provider.ContactsContract.Settings;
 import android.provider.ContactsContract.StatusUpdates;
 import android.provider.ContactsContract.StreamItemPhotos;
 import android.provider.ContactsContract.StreamItems;
-import android.provider.LiveFolders;
 import android.provider.OpenableColumns;
 import android.provider.SyncStateContract;
 import android.telephony.PhoneNumberUtils;
@@ -236,13 +235,6 @@ public class ContactsProvider2 extends AbstractContactsProvider
      */
     private static final String TIMES_USED_SORT_COLUMN = "times_used_sort";
 
-    private static final String STREQUENT_ORDER_BY = Contacts.STARRED + " DESC, "
-            + TIMES_USED_SORT_COLUMN + " DESC, "
-            + Contacts.DISPLAY_NAME + " COLLATE LOCALIZED ASC";
-    private static final String STREQUENT_LIMIT =
-            "(SELECT COUNT(1) FROM " + Tables.CONTACTS + " WHERE "
-            + Contacts.STARRED + "=1) + 25";
-
     private static final String FREQUENT_ORDER_BY = DataUsageStatColumns.TIMES_USED + " DESC,"
             + Contacts.DISPLAY_NAME + " COLLATE LOCALIZED ASC";
 
@@ -332,11 +324,6 @@ public class ContactsProvider2 extends AbstractContactsProvider
 
     private static final int SEARCH_SUGGESTIONS = 12001;
     private static final int SEARCH_SHORTCUT = 12002;
-
-    private static final int LIVE_FOLDERS_CONTACTS = 14000;
-    private static final int LIVE_FOLDERS_CONTACTS_WITH_PHONES = 14001;
-    private static final int LIVE_FOLDERS_CONTACTS_FAVORITES = 14002;
-    private static final int LIVE_FOLDERS_CONTACTS_GROUP_NAME = 14003;
 
     private static final int RAW_CONTACT_ENTITIES = 15001;
 
@@ -801,6 +788,14 @@ public class ContactsProvider2 extends AbstractContactsProvider
             .addAll(sDataPresenceColumns)
             .build();
 
+    /** Contains columns in PhoneLookup which are not contained in the data view. */
+    private static final ProjectionMap sSipLookupColumns = ProjectionMap.builder()
+            .add(PhoneLookup.NUMBER, SipAddress.SIP_ADDRESS)
+            .add(PhoneLookup.TYPE, "0")
+            .add(PhoneLookup.LABEL, "NULL")
+            .add(PhoneLookup.NORMALIZED_NUMBER, "NULL")
+            .build();
+
     /** Contains columns from the data view */
     private static final ProjectionMap sDataProjectionMap = ProjectionMap.builder()
             .add(Data._ID)
@@ -815,6 +810,12 @@ public class ContactsProvider2 extends AbstractContactsProvider
             .addAll(sContactPresenceColumns)
             .build();
 
+    /** Contains columns from the data view used for SIP address lookup. */
+    private static final ProjectionMap sDataSipLookupProjectionMap = ProjectionMap.builder()
+            .addAll(sDataProjectionMap)
+            .addAll(sSipLookupColumns)
+            .build();
+
     /** Contains columns from the data view */
     private static final ProjectionMap sDistinctDataProjectionMap = ProjectionMap.builder()
             .add(Data._ID, "MIN(" + Data._ID + ")")
@@ -824,6 +825,12 @@ public class ContactsProvider2 extends AbstractContactsProvider
             .addAll(sDataPresenceColumns)
             .addAll(sContactsColumns)
             .addAll(sContactPresenceColumns)
+            .build();
+
+    /** Contains columns from the data view used for SIP address lookup. */
+    private static final ProjectionMap sDistinctDataSipLookupProjectionMap = ProjectionMap.builder()
+            .addAll(sDistinctDataProjectionMap)
+            .addAll(sSipLookupColumns)
             .build();
 
     /** Contains the data and contacts columns, for joined tables */
@@ -874,13 +881,16 @@ public class ContactsProvider2 extends AbstractContactsProvider
             .add(Groups.SYNC4)
             .build();
 
-    /** Contains {@link Groups} columns along with summary details */
+    /**
+     * Contains {@link Groups} columns along with summary details.
+     *
+     * Note {@link Groups#SUMMARY_COUNT} doesn't exist in groups/view_groups.
+     * When we detect this column being requested, we join {@link Joins#GROUP_MEMBER_COUNT} to
+     * generate it.
+     */
     private static final ProjectionMap sGroupsSummaryProjectionMap = ProjectionMap.builder()
             .addAll(sGroupsProjectionMap)
-            .add(Groups.SUMMARY_COUNT,
-                    "(SELECT COUNT(" + ContactsColumns.CONCRETE_ID + ") FROM "
-                        + Tables.CONTACTS_JOIN_RAW_CONTACTS_DATA_FILTERED_BY_GROUPMEMBERSHIP
-                        + ")")
+            .add(Groups.SUMMARY_COUNT, "ifnull(group_member_count, 0)")
             .add(Groups.SUMMARY_WITH_PHONES,
                     "(SELECT COUNT(" + ContactsColumns.CONCRETE_ID + ") FROM "
                         + Tables.CONTACTS_JOIN_RAW_CONTACTS_DATA_FILTERED_BY_GROUPMEMBERSHIP
@@ -1019,15 +1029,6 @@ public class ContactsProvider2 extends AbstractContactsProvider
             .add(StreamItemPhotos.SYNC2)
             .add(StreamItemPhotos.SYNC3)
             .add(StreamItemPhotos.SYNC4)
-            .build();
-
-    /** Contains Live Folders columns */
-    private static final ProjectionMap sLiveFoldersProjectionMap = ProjectionMap.builder()
-            .add(LiveFolders._ID, Contacts._ID)
-            .add(LiveFolders.NAME, Contacts.DISPLAY_NAME)
-            // TODO: Put contact photo back when we have a way to display a default icon
-            // for contacts without a photo
-            // .add(LiveFolders.ICON_BITMAP, Photos.DATA)
             .build();
 
     /** Contains {@link Directory} columns */
@@ -1186,15 +1187,6 @@ public class ContactsProvider2 extends AbstractContactsProvider
                 SEARCH_SUGGESTIONS);
         matcher.addURI(ContactsContract.AUTHORITY, SearchManager.SUGGEST_URI_PATH_SHORTCUT + "/*",
                 SEARCH_SHORTCUT);
-
-        matcher.addURI(ContactsContract.AUTHORITY, "live_folders/contacts",
-                LIVE_FOLDERS_CONTACTS);
-        matcher.addURI(ContactsContract.AUTHORITY, "live_folders/contacts/*",
-                LIVE_FOLDERS_CONTACTS_GROUP_NAME);
-        matcher.addURI(ContactsContract.AUTHORITY, "live_folders/contacts_with_phones",
-                LIVE_FOLDERS_CONTACTS_WITH_PHONES);
-        matcher.addURI(ContactsContract.AUTHORITY, "live_folders/favorites",
-                LIVE_FOLDERS_CONTACTS_FAVORITES);
 
         matcher.addURI(ContactsContract.AUTHORITY, "provider_status", PROVIDER_STATUS);
 
@@ -4979,6 +4971,17 @@ public class ContactsProvider2 extends AbstractContactsProvider
         }
     }
 
+    private boolean hasColumn(String[] projection, String column) {
+        if (projection == null) {
+            return true; // Null projection means "all columns".
+        }
+
+        for (int i = 0; i < projection.length; i++) {
+            if (column.equalsIgnoreCase(projection[i])) return true;
+        }
+        return false;
+    }
+
     protected Cursor queryLocal(Uri uri, String[] projection, String selection,
             String[] selectionArgs, String sortOrder, long directoryId) {
         if (VERBOSE_LOGGING) {
@@ -5194,15 +5197,17 @@ public class ContactsProvider2 extends AbstractContactsProvider
                             selection, Contacts.HAS_PHONE_NUMBER + "=1"));
                 }
                 qb.setStrict(true);
-                final String starredQuery = qb.buildQuery(subProjection,
-                        Contacts.STARRED + "=1", Contacts._ID, null, null, null);
+                final String starredInnerQuery = qb.buildQuery(subProjection,
+                        Contacts.STARRED + "=1", Contacts._ID, null,
+                        Contacts.DISPLAY_NAME + " COLLATE LOCALIZED ASC", null);
 
                 // Reset the builder.
                 qb = new SQLiteQueryBuilder();
                 qb.setStrict(true);
 
-                // Build the second query for frequent part.
-                final String frequentQuery;
+                // Build the second query for frequent part. These JOINS can be very slow
+                // if assembled in the wrong order. Be sure to test changes against huge databases.
+                final String frequentInnerQuery;
                 if (phoneOnly) {
                     final StringBuilder tableBuilder = new StringBuilder();
                     // In phone only mode, we need to look at view_data instead of
@@ -5227,27 +5232,36 @@ public class ContactsProvider2 extends AbstractContactsProvider
 
                     qb.setTables(tableBuilder.toString());
                     qb.setProjectionMap(sStrequentPhoneOnlyFrequentProjectionMap);
+                    final long phoneMimeTypeId =
+                            mDbHelper.get().getMimeTypeId(Phone.CONTENT_ITEM_TYPE);
+                    final long sipMimeTypeId =
+                            mDbHelper.get().getMimeTypeId(SipAddress.CONTENT_ITEM_TYPE);
                     qb.appendWhere(DbQueryUtils.concatenateClauses(
                             selection,
                             Contacts.STARRED + "=0 OR " + Contacts.STARRED + " IS NULL",
-                            MimetypesColumns.MIMETYPE + " IN ("
-                            + "'" + Phone.CONTENT_ITEM_TYPE + "', "
-                            + "'" + SipAddress.CONTENT_ITEM_TYPE + "')"));
-                    frequentQuery = qb.buildQuery(subProjection, null, null, null, null, null);
+                            DataColumns.MIMETYPE_ID + " IN (" +
+                            phoneMimeTypeId + ", " + sipMimeTypeId + ")"));
+                    frequentInnerQuery =
+                            qb.buildQuery(subProjection, null, null, null,
+                            TIMES_USED_SORT_COLUMN + " DESC", "25");
                 } else {
                     setTablesAndProjectionMapForContacts(qb, uri, projection, true);
                     qb.setProjectionMap(sStrequentFrequentProjectionMap);
                     qb.appendWhere(DbQueryUtils.concatenateClauses(
                             selection,
                             "(" + Contacts.STARRED + " =0 OR " + Contacts.STARRED + " IS NULL)"));
-                    frequentQuery = qb.buildQuery(subProjection,
-                            null, Contacts._ID, null, null, null);
+                    frequentInnerQuery = qb.buildQuery(subProjection,
+                            null, Contacts._ID, null, null, "25");
                 }
+
+                // We need to wrap the inner queries in an extra select, because they contain
+                // their own SORT and LIMIT
+                final String frequentQuery = "SELECT * FROM (" + frequentInnerQuery + ")";
+                final String starredQuery = "SELECT * FROM (" + starredInnerQuery + ")";
 
                 // Put them together
                 final String unionQuery =
-                        qb.buildUnionQuery(new String[] {starredQuery, frequentQuery},
-                                STREQUENT_ORDER_BY, STREQUENT_LIMIT);
+                        qb.buildUnionQuery(new String[] {starredQuery, frequentQuery}, null, null);
 
                 // Here, we need to use selection / selectionArgs (supplied from users) "twice",
                 // as we want them both for starred items and for frequently contacted items.
@@ -5424,17 +5438,21 @@ public class ContactsProvider2 extends AbstractContactsProvider
                 qb.appendWhere(" AND " + DataColumns.MIMETYPE_ID + "=" +
                         mDbHelper.get().getMimeTypeIdForPhone());
 
-                // Dedupe phone numbers per contact.
-                groupBy = RawContacts.CONTACT_ID + ", " + Data.DATA1;
+                final boolean removeDuplicates = readBooleanQueryParameter(
+                        uri, ContactsContract.REMOVE_DUPLICATE_ENTRIES, false);
+                if (removeDuplicates) {
+                    groupBy = RawContacts.CONTACT_ID + ", " + Data.DATA1;
 
-                // In this case, because we dedupe phone numbers, the address book indexer needs
-                // to take it into account too.  (Otherwise headers will appear in wrong positions.)
-                // So use count(distinct pair(CONTACT_ID, PHONE NUMBER)) instead of count(*).
-                // But because there's no such thing as pair() on sqlite, we use
-                // CONTACT_ID || ',' || PHONE NUMBER instead.
-                // This only slows down the query by 14% with 10,000 contacts.
-                addressBookIndexerCountExpression = "DISTINCT "
-                        + RawContacts.CONTACT_ID + "||','||" + Data.DATA1;
+                    // In this case, because we dedupe phone numbers, the address book indexer needs
+                    // to take it into account too.  (Otherwise headers will appear in wrong
+                    // positions.)
+                    // So use count(distinct pair(CONTACT_ID, PHONE NUMBER)) instead of count(*).
+                    // But because there's no such thing as pair() on sqlite, we use
+                    // CONTACT_ID || ',' || PHONE NUMBER instead.
+                    // This only slows down the query by 14% with 10,000 contacts.
+                    addressBookIndexerCountExpression = "DISTINCT "
+                            + RawContacts.CONTACT_ID + "||','||" + Data.DATA1;
+                }
                 break;
             }
 
@@ -5519,6 +5537,16 @@ public class ContactsProvider2 extends AbstractContactsProvider
                 setTablesAndProjectionMapForData(qb, uri, projection, false);
                 qb.appendWhere(" AND " + DataColumns.MIMETYPE_ID + " = "
                         + mDbHelper.get().getMimeTypeIdForEmail());
+
+                final boolean removeDuplicates = readBooleanQueryParameter(
+                        uri, ContactsContract.REMOVE_DUPLICATE_ENTRIES, false);
+                if (removeDuplicates) {
+                    groupBy = RawContacts.CONTACT_ID + ", " + Data.DATA1;
+
+                    // See PHONES for more detail.
+                    addressBookIndexerCountExpression = "DISTINCT "
+                            + RawContacts.CONTACT_ID + "||','||" + Data.DATA1;
+                }
                 break;
             }
 
@@ -5540,6 +5568,11 @@ public class ContactsProvider2 extends AbstractContactsProvider
                     String address = mDbHelper.get().extractAddressFromEmailAddress(email);
                     selectionArgs = insertSelectionArg(selectionArgs, address);
                     qb.appendWhere(" AND UPPER(" + Email.DATA + ")=UPPER(?)");
+                }
+                // unless told otherwise, we'll return visible before invisible contacts
+                if (sortOrder == null) {
+                    sortOrder = "(" + RawContacts.CONTACT_ID + " IN " +
+                            Tables.DEFAULT_DIRECTORY + ") DESC";
                 }
                 break;
             }
@@ -5610,6 +5643,16 @@ public class ContactsProvider2 extends AbstractContactsProvider
                 setTablesAndProjectionMapForData(qb, uri, projection, false);
                 qb.appendWhere(" AND " + DataColumns.MIMETYPE_ID + " = "
                         + mDbHelper.get().getMimeTypeIdForStructuredPostal());
+
+                final boolean removeDuplicates = readBooleanQueryParameter(
+                        uri, ContactsContract.REMOVE_DUPLICATE_ENTRIES, false);
+                if (removeDuplicates) {
+                    groupBy = RawContacts.CONTACT_ID + ", " + Data.DATA1;
+
+                    // See PHONES for more detail.
+                    addressBookIndexerCountExpression = "DISTINCT "
+                            + RawContacts.CONTACT_ID + "||','||" + Data.DATA1;
+                }
                 break;
             }
 
@@ -5695,23 +5738,39 @@ public class ContactsProvider2 extends AbstractContactsProvider
             }
 
             case PHONE_LOOKUP: {
-
-                if (TextUtils.isEmpty(sortOrder)) {
-                    // Default the sort order to something reasonable so we get consistent
-                    // results when callers don't request an ordering
-                    sortOrder = " length(lookup.normalized_number) DESC";
-                }
-
-                String number = uri.getPathSegments().size() > 1 ? uri.getLastPathSegment() : "";
-                String numberE164 = PhoneNumberUtils.formatNumberToE164(number,
-                        mDbHelper.get().getCurrentCountryIso());
-                String normalizedNumber =
-                        PhoneNumberUtils.normalizeNumber(number);
-                mDbHelper.get().buildPhoneLookupAndContactQuery(qb, normalizedNumber, numberE164);
-                qb.setProjectionMap(sPhoneLookupProjectionMap);
                 // Phone lookup cannot be combined with a selection
                 selection = null;
                 selectionArgs = null;
+                if (uri.getBooleanQueryParameter(PhoneLookup.QUERY_PARAMETER_SIP_ADDRESS, false)) {
+                    if (TextUtils.isEmpty(sortOrder)) {
+                        // Default the sort order to something reasonable so we get consistent
+                        // results when callers don't request an ordering
+                        sortOrder = Contacts.DISPLAY_NAME + " ASC";
+                    }
+
+                    String sipAddress = uri.getPathSegments().size() > 1
+                            ? Uri.decode(uri.getLastPathSegment()) : "";
+                    setTablesAndProjectionMapForData(qb, uri, null, false, true);
+                    StringBuilder sb = new StringBuilder();
+                    selectionArgs = mDbHelper.get().buildSipContactQuery(sb, sipAddress);
+                    selection = sb.toString();
+                } else {
+                    if (TextUtils.isEmpty(sortOrder)) {
+                        // Default the sort order to something reasonable so we get consistent
+                        // results when callers don't request an ordering
+                        sortOrder = " length(lookup.normalized_number) DESC";
+                    }
+
+                    String number = uri.getPathSegments().size() > 1
+                            ? uri.getLastPathSegment() : "";
+                    String numberE164 = PhoneNumberUtils.formatNumberToE164(number,
+                            mDbHelper.get().getCurrentCountryIso());
+                    String normalizedNumber =
+                            PhoneNumberUtils.normalizeNumber(number);
+                    mDbHelper.get().buildPhoneLookupAndContactQuery(
+                            qb, normalizedNumber, numberE164);
+                    qb.setProjectionMap(sPhoneLookupProjectionMap);
+                }
                 break;
             }
 
@@ -5734,7 +5793,11 @@ public class ContactsProvider2 extends AbstractContactsProvider
                 final boolean returnGroupCountPerAccount =
                         readBooleanQueryParameter(uri, Groups.PARAM_RETURN_GROUP_COUNT_PER_ACCOUNT,
                                 false);
-                qb.setTables(Views.GROUPS + " AS " + Tables.GROUPS);
+                String tables = Views.GROUPS + " AS " + Tables.GROUPS;
+                if (hasColumn(projection, Groups.SUMMARY_COUNT)) {
+                    tables = tables + Joins.GROUP_MEMBER_COUNT;
+                }
+                qb.setTables(tables);
                 qb.setProjectionMap(returnGroupCountPerAccount ?
                         sGroupsSummaryProjectionMapWithGroupCountPerAccount
                         : sGroupsSummaryProjectionMap);
@@ -5831,33 +5894,6 @@ public class ContactsProvider2 extends AbstractContactsProvider
                 return mGlobalSearchSupport.handleSearchShortcutRefresh(
                         mActiveDb.get(), projection, lookupKey, filter);
             }
-
-            case LIVE_FOLDERS_CONTACTS:
-                qb.setTables(Views.CONTACTS);
-                qb.setProjectionMap(sLiveFoldersProjectionMap);
-                break;
-
-            case LIVE_FOLDERS_CONTACTS_WITH_PHONES:
-                qb.setTables(Views.CONTACTS);
-                qb.setProjectionMap(sLiveFoldersProjectionMap);
-                qb.appendWhere(Contacts.HAS_PHONE_NUMBER + "=1");
-                break;
-
-            case LIVE_FOLDERS_CONTACTS_FAVORITES:
-                qb.setTables(Views.CONTACTS);
-                qb.setProjectionMap(sLiveFoldersProjectionMap);
-                qb.appendWhere(Contacts.STARRED + "=1");
-                break;
-
-            case LIVE_FOLDERS_CONTACTS_GROUP_NAME:
-                qb.setTables(Views.CONTACTS);
-                qb.setProjectionMap(sLiveFoldersProjectionMap);
-                qb.appendWhere(CONTACTS_IN_GROUP_SELECT);
-                String groupMimeTypeId = String.valueOf(
-                        mDbHelper.get().getMimeTypeId(GroupMembership.CONTENT_ITEM_TYPE));
-                selectionArgs = insertSelectionArg(selectionArgs, uri.getLastPathSegment());
-                selectionArgs = insertSelectionArg(selectionArgs, groupMimeTypeId);
-                break;
 
             case RAW_CONTACT_ENTITIES:
             case PROFILE_RAW_CONTACT_ENTITIES: {
@@ -6027,7 +6063,8 @@ public class ContactsProvider2 extends AbstractContactsProvider
 
         String locale = getLocale().toString();
         HashMap<String, String> projectionMap = Maps.newHashMap();
-        String sectionHeading = String.format(AddressBookIndexQuery.SECTION_HEADING, sortKey);
+        String sectionHeading = String.format(Locale.US, AddressBookIndexQuery.SECTION_HEADING,
+                sortKey);
         projectionMap.put(AddressBookIndexQuery.LETTER,
                 sectionHeading + " AS " + AddressBookIndexQuery.LETTER);
 
@@ -6389,13 +6426,16 @@ public class ContactsProvider2 extends AbstractContactsProvider
     private void setTablesAndProjectionMapForContacts(SQLiteQueryBuilder qb, Uri uri,
             String[] projection, boolean includeDataUsageStat) {
         StringBuilder sb = new StringBuilder();
+        if (includeDataUsageStat) {
+            sb.append(Views.DATA_USAGE_STAT + " AS " + Tables.DATA_USAGE_STAT);
+            sb.append(" INNER JOIN ");
+        }
+
         sb.append(Views.CONTACTS);
 
         // Just for frequently contacted contacts in Strequent Uri handling.
         if (includeDataUsageStat) {
-            sb.append(" INNER JOIN " +
-                    Views.DATA_USAGE_STAT + " AS " + Tables.DATA_USAGE_STAT +
-                    " ON (" +
+            sb.append(" ON (" +
                     DbQueryUtils.concatenateClauses(
                             DataUsageStatColumns.CONCRETE_TIMES_USED + " > 0",
                             RawContacts.CONTACT_ID + "=" + Views.CONTACTS + "." + Contacts._ID) +
@@ -6643,7 +6683,12 @@ public class ContactsProvider2 extends AbstractContactsProvider
 
     private void setTablesAndProjectionMapForData(SQLiteQueryBuilder qb, Uri uri,
             String[] projection, boolean distinct) {
-        setTablesAndProjectionMapForData(qb, uri, projection, distinct, null);
+        setTablesAndProjectionMapForData(qb, uri, projection, distinct, false, null);
+    }
+
+    private void setTablesAndProjectionMapForData(SQLiteQueryBuilder qb, Uri uri,
+            String[] projection, boolean distinct, boolean addSipLookupColumns) {
+        setTablesAndProjectionMapForData(qb, uri, projection, distinct, addSipLookupColumns, null);
     }
 
     /**
@@ -6652,6 +6697,11 @@ public class ContactsProvider2 extends AbstractContactsProvider
      */
     private void setTablesAndProjectionMapForData(SQLiteQueryBuilder qb, Uri uri,
             String[] projection, boolean distinct, Integer usageType) {
+        setTablesAndProjectionMapForData(qb, uri, projection, distinct, false, usageType);
+    }
+
+    private void setTablesAndProjectionMapForData(SQLiteQueryBuilder qb, Uri uri,
+            String[] projection, boolean distinct, boolean addSipLookupColumns, Integer usageType) {
         StringBuilder sb = new StringBuilder();
         sb.append(Views.DATA);
         sb.append(" data");
@@ -6670,7 +6720,16 @@ public class ContactsProvider2 extends AbstractContactsProvider
         boolean useDistinct = distinct
                 || !mDbHelper.get().isInProjection(projection, DISTINCT_DATA_PROHIBITING_COLUMNS);
         qb.setDistinct(useDistinct);
-        qb.setProjectionMap(useDistinct ? sDistinctDataProjectionMap : sDataProjectionMap);
+
+        final ProjectionMap projectionMap;
+        if (addSipLookupColumns) {
+            projectionMap = useDistinct
+                    ? sDistinctDataSipLookupProjectionMap : sDataSipLookupProjectionMap;
+        } else {
+            projectionMap = useDistinct ? sDistinctDataProjectionMap : sDataProjectionMap;
+        }
+
+        qb.setProjectionMap(projectionMap);
         appendAccountFromParameter(qb, uri);
     }
 

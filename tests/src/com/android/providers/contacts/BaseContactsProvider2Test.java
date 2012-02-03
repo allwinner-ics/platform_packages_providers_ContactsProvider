@@ -27,7 +27,6 @@ import android.content.ContentUris;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.Entity;
-import android.database.AbstractCursor;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
@@ -919,9 +918,14 @@ public abstract class BaseContactsProvider2Test extends PhotoLoadingTestCase {
     }
 
     protected void assertStoredValuesWithProjection(Uri rowUri, ContentValues expectedValues) {
-        Cursor c = mResolver.query(rowUri, buildProjection(expectedValues), null, null, null);
+        assertStoredValuesWithProjection(rowUri, new ContentValues[] {expectedValues});
+    }
+
+    protected void assertStoredValuesWithProjection(Uri rowUri, ContentValues[] expectedValues) {
+        assertTrue("Need at least one ContentValues for this test", expectedValues.length > 0);
+        Cursor c = mResolver.query(rowUri, buildProjection(expectedValues[0]), null, null, null);
         try {
-            assertEquals("Record count", 1, c.getCount());
+            assertEquals("Record count", expectedValues.length, c.getCount());
             c.moveToFirst();
             assertCursorValues(c, expectedValues);
         } finally {

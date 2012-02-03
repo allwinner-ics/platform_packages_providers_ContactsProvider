@@ -225,6 +225,7 @@ public class ContactMatcher {
         /**
          * Descending order of match score.
          */
+        @Override
         public int compareTo(MatchScore another) {
             return another.getScore() - getScore();
         }
@@ -257,6 +258,13 @@ public class ContactMatcher {
             mScores.put(contactId, matchingScore);
         }
         return matchingScore;
+    }
+
+    /**
+     * Marks the contact as a full match, because we found an Identity match
+     */
+    public void matchIdentity(long contactId) {
+        updatePrimaryScore(contactId, MAX_SCORE);
     }
 
     /**
